@@ -1,0 +1,36 @@
+# Python cache and compiled files
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environment
+venv/
+venv310/
+
+# Environment variables
+.env
+.env.*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary / generated files
+shared/temp_audio/
+tmp/
+*.tmp
+
+# Model weights and large files
+*.safetensors
+*.pt
+*.bin
+models/
+checkpoints/
+
+# Node / frontend stuff (if exists)
+node_modules/
+dist/
+build/
