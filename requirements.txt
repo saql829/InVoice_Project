@@ -1,0 +1,15 @@
+fastapi
+uvicorn[standard]
+python-multipart
+pydub
+ffmpeg-python
+transformers
+torch
+accelerate
+whisper
+TTS
+python-dotenv
+soundfile
+scipy
+numpy
+websockets

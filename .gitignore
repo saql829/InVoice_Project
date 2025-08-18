@@ -1,0 +1,110 @@
+# ========================
+# PYTHON
+# ========================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Virtual environments
+venv/
+venv*/
+.env
+.env.*
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# PyInstaller
+*.spec
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# mypy
+.mypy_cache/
+
+# pytest
+.pytest_cache/
+.cache
+
+# coverage reports
+htmlcov/
+.coverage*
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+
+# ========================
+# REACT.JS / FRONTEND
+# ========================
+
+node_modules/
+build/
+dist/
+*.log
+*.cache
+.npm/
+.pnpm-debug.log*
+yarn.lock
+yarn-error.log*
+npm-debug.log*
+
+# Vite/Next/CRA specific
+.vite/
+.next/
+out/
+
+# ========================
+# OS / IDE
+# ========================
+
+.DS_Store       # macOS
+Thumbs.db       # Windows (optional)
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# ========================
+# TEMP / AUDIO / SHARED
+# ========================
+
+tmp/
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+shared/temp_audio/
+
+# ========================
+# ML MODELS / LARGE FILES
+# ========================
+
+*.safetensors
+*.pt
+*.bin
+models/
+checkpoints/
+
+# ========================
+# DATABASES / BACKUPS
+# ========================
+
+*.db
+*.sqlite3
+*.sqlite
+*.pkl
+*.joblib
+*.bak
+*.npy
+*.npz
