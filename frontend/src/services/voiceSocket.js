@@ -1,10 +1,12 @@
-// frontend/src/services/voiceSocket.js
 // Handles JSON messages and binary PCM16 streaming for TTS + STT.
 
-export function createVoiceSocket({ url = "ws://localhost:8000/ws/voice", onEvent }) {
+export function createVoiceSocket({ url = "ws://localhost:8000/api/ws/voice", onEvent }) {
   let ws = null;
   let audioPlayer = createAudioPlayer();
   const notify = (evt) => { try { onEvent?.(evt); } catch (e) { console.warn(e); } };
+
+  // remember last config so we can re-send on reconnect
+  let lastConfig = null;
 
   function connect() {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
@@ -13,7 +15,10 @@ export function createVoiceSocket({ url = "ws://localhost:8000/ws/voice", onEven
 
     ws.onopen = () => {
       notify({ type: "socket_open" });
-      try { ws.send(JSON.stringify({ type: "start", sample_rate: 16000 })); } catch {}
+      // push last config if available
+      if (lastConfig) {
+        try { ws.send(JSON.stringify({ type: "config", ...lastConfig })); } catch {}
+      }
     };
 
     ws.onmessage = (e) => {
@@ -25,6 +30,11 @@ export function createVoiceSocket({ url = "ws://localhost:8000/ws/voice", onEven
 
         let data;
         try { data = JSON.parse(e.data); } catch (err) { notify({ type: "raw", text: String(e.data) }); return; }
+
+        if (data.type === "config-ack") {
+          notify({ type: "config-ack", persona: data.persona, tts_preset: data.tts_preset });
+          return;
+        }
 
         if (data.type === "tts_chunk" && data.b64) {
           const bin = atob(data.b64);
@@ -61,6 +71,11 @@ export function createVoiceSocket({ url = "ws://localhost:8000/ws/voice", onEven
   function sendDone() { if (!ws || ws.readyState !== WebSocket.OPEN) return; try { ws.send("done"); } catch {} }
   function sendAudio(buffer) { if (!ws || ws.readyState !== WebSocket.OPEN) return; try { ws.send(buffer); } catch {} }
   function stop() { try { ws?.close(); } catch {}; ws = null; try { audioPlayer.close(); } catch {} }
+  function sendConfig({ persona, ttsPreset, rate, pitch } = {}) {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    lastConfig = { persona, tts_preset: ttsPreset, rate, pitch };
+    try { ws.send(JSON.stringify({ type: "config", persona, tts_preset: ttsPreset, rate, pitch })); } catch {}
+  }
 
   connect();
 
@@ -68,6 +83,7 @@ export function createVoiceSocket({ url = "ws://localhost:8000/ws/voice", onEven
     sendStart,
     sendDone,
     sendAudio,
+    sendConfig,
     stop,
     playTTS: (arrayBuffer) => audioPlayer.playPcm16Chunk(arrayBuffer),
     get ready() { return ws?.readyState === WebSocket.OPEN; },
@@ -116,4 +132,11 @@ function createAudioPlayer() {
   }
 
   return { playPcm16Chunk, setSampleRate, close };
+}
+
+// Fetch available personas + presets from backend
+export async function fetchPersonas() {
+  const res = await fetch("/api/personas");
+  if (!res.ok) throw new Error("Failed to load personas");
+  return res.json();
 }

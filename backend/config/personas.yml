@@ -1,0 +1,34 @@
+personas:
+  neutral:
+    label: "Neutral"
+    system_prompt: |
+      You are concise and helpful. Keep answers short.
+    tts_preset: "alloy"
+
+  friendly:
+    label: "Friendly"
+    system_prompt: |
+      You are warm and upbeat. Use simple words and short sentences.
+    tts_preset: "serene"
+
+  teacher:
+    label: "Teacher"
+    system_prompt: |
+      Explain step-by-step. Define terms before using them. Keep answers compact.
+    tts_preset: "sage"
+
+tts_presets:
+  alloy:
+    voice: "alloy"
+    speaker_wav: null
+    language: "en"
+
+  serene:
+    voice: "serene"
+    speaker_wav: null
+    language: "en"
+
+  sage:
+    voice: "sage"
+    speaker_wav: null
+    language: "en"

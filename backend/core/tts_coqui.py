@@ -1,10 +1,9 @@
-# backend/core/tts_coqui.py
 """
 Coqui TTS wrapper with simple streaming.
 - Streams PCM16 chunks (headerless) so frontend can play incrementally.
-- Produces the full audio then yields small chunks (works reliably).
+- Preset-aware helpers (speaker_wav/lang/model) for personas.
 """
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Dict, Tuple
 import numpy as np
 
 from config.settings import (
@@ -14,32 +13,53 @@ from config.settings import (
     TTS_CHUNK_MS,
 )
 
-# Local float32->pcm16
+# ---------------- Utils ----------------
+
 def _float32_to_pcm16(f32: np.ndarray) -> bytes:
     x = np.clip(f32, -1.0, 1.0)
     x = (x * 32767.0).astype(np.int16)
     return x.tobytes()
 
-_TTS_INSTANCE = None
-_TTS_SR = None
-_IS_XTTS = False
+# Aliases so short names won't crash
+_XTTS_ALIASES = {
+    "xtts_v2": "tts_models/multilingual/multi-dataset/xtts_v2",
+    "xtts-v2": "tts_models/multilingual/multi-dataset/xtts_v2",
+    "coqui-xtts-v2": "tts_models/multilingual/multi-dataset/xtts_v2",
+}
+def _normalize_model(name: Optional[str]) -> str:
+    name = (name or "").strip()
+    if not name:
+        return "tts_models/multilingual/multi-dataset/xtts_v2"
+    return _XTTS_ALIASES.get(name, name)
 
-def _ensure_init():
-    global _TTS_INSTANCE, _TTS_SR, _IS_XTTS
-    if _TTS_INSTANCE is not None:
-        return
+# ---------------- Global cache ----------------
+# model_id -> (TTS instance, sample_rate, is_xtts)
+_TTS_CACHE: Dict[str, Tuple[object, int, bool]] = {}
+
+def _ensure_model(model_name: Optional[str] = None) -> Tuple[object, int, bool]:
+    """
+    Ensure a TTS model is loaded and cached. Returns (instance, sample_rate, is_xtts)
+    """
     try:
-        from TTS.api import TTS
+        from TTS.api import TTS  # lazy import with friendly error if missing
     except Exception as e:
         raise RuntimeError(
             "Coqui TTS not installed. Add `TTS` to requirements and pip install TTS."
         ) from e
 
-    model_name = TTS_MODEL or "tts_models/multilingual/multi-dataset/xtts_v2"
-    _TTS_INSTANCE = TTS(model_name)
-    sr = getattr(_TTS_INSTANCE, "output_sample_rate", None)
-    _TTS_SR = int(sr or TTS_SAMPLE_RATE or 22050)
-    _IS_XTTS = "xtts" in model_name.lower()
+    model_id = _normalize_model(model_name or TTS_MODEL)
+
+    if model_id in _TTS_CACHE:
+        return _TTS_CACHE[model_id]
+
+    inst = TTS(model_id)
+    sr = getattr(inst, "output_sample_rate", None)
+    sr = int(sr or TTS_SAMPLE_RATE or 22050)
+    is_xtts = "xtts" in model_id.lower()
+    _TTS_CACHE[model_id] = (inst, sr, is_xtts)
+    return _TTS_CACHE[model_id]
+
+# ---------------- Core synth ----------------
 
 def tts_full_pcm16(
     text: str,
@@ -47,22 +67,42 @@ def tts_full_pcm16(
     speaker_wav: Optional[str] = None,
     language: Optional[str] = None,
     sample_rate: Optional[int] = None,
+    model: Optional[str] = None,
 ) -> bytes:
     """
-    Synthesize full utterance -> PCM16 raw bytes.
+    Return full utterance as PCM16 bytes (mono).
     """
     if not (text or "").strip():
         return b""
-    _ensure_init()
+
+    inst, sr_model, is_xtts = _ensure_model(model)
     lang = (language or TTS_LANGUAGE or "en").lower()
-    sr = int(sample_rate or _TTS_SR)
-    if _IS_XTTS:
-        wav = _TTS_INSTANCE.tts(text=text, speaker_wav=speaker_wav, language=lang)
+    sr = int(sample_rate or sr_model)
+
+    if is_xtts:
+        wav = inst.tts(text=text, speaker_wav=speaker_wav, language=lang)
     else:
-        wav = _TTS_INSTANCE.tts(text=text)
+        # non-XTTS models ignore speaker/lang
+        wav = inst.tts(text=text)
+
     wav = np.asarray(wav, dtype=np.float32)
     pcm = _float32_to_pcm16(wav)
     return pcm
+
+def tts_with_preset(text: str, preset: dict | None = None) -> bytes:
+    """
+    preset keys (all optional):
+      - model:       coqui model id or alias ('xtts_v2')
+      - speaker_wav: path to reference wav (XTTS)
+      - language:    'en', 'hi', 'ur', etc. (XTTS)
+    """
+    p = preset or {}
+    return tts_full_pcm16(
+        text,
+        speaker_wav=p.get("speaker_wav"),
+        language=p.get("language"),
+        model=p.get("model") or TTS_MODEL,
+    )
 
 def stream_tts_pcm(
     text: str,
@@ -70,23 +110,30 @@ def stream_tts_pcm(
     speaker_wav: Optional[str] = None,
     language: Optional[str] = None,
     chunk_ms: Optional[int] = None,
+    model: Optional[str] = None,
 ) -> Iterable[bytes]:
-    """
-    Generate full audio then yield PCM16 in small chunks (fake streaming).
-    Works reliably and starts delivering chunks quickly.
-    """
-    pcm = tts_full_pcm16(text, speaker_wav=speaker_wav, language=language)
+    pcm = tts_full_pcm16(text, speaker_wav=speaker_wav, language=language, model=model)
     if not pcm:
         return
-    _ensure_init()
-    sr = _TTS_SR
-    ms = int(chunk_ms or TTS_CHUNK_MS or 80)  # default chunk size (ms)
-    # bytes per ms: (sr * 2 bytes * 1ch) / 1000
+    _, sr, _ = _ensure_model(model)
+    ms = int(chunk_ms or TTS_CHUNK_MS or 80)
+    b_per_ms = (sr * 2) / 1000.0  # 16-bit mono
+    step = max(1, int(ms * b_per_ms))
+    for i in range(0, len(pcm), step):
+        yield pcm[i : i + step]
+
+def stream_tts_with_preset(text: str, preset: dict | None = None) -> Iterable[bytes]:
+    p = preset or {}
+    pcm = tts_with_preset(text, p)
+    if not pcm:
+        return
+    _, sr, _ = _ensure_model(p.get("model"))
+    ms = int(TTS_CHUNK_MS or 80)
     b_per_ms = (sr * 2) / 1000.0
     step = max(1, int(ms * b_per_ms))
     for i in range(0, len(pcm), step):
         yield pcm[i : i + step]
 
 def tts_info():
-    _ensure_init()
-    return {"model": TTS_MODEL, "sample_rate": _TTS_SR, "is_xtts": _IS_XTTS}
+    inst, sr, is_xtts = _ensure_model()
+    return {"model": type(inst).__name__, "sample_rate": sr, "is_xtts": is_xtts}

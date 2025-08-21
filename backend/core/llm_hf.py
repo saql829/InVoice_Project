@@ -1,5 +1,3 @@
-# backend/core/llm_hf.py
-
 import os
 import re
 import threading
@@ -53,7 +51,6 @@ _BAD_MARKERS_RE = re.compile(r"(Assistant:|User:|</s>|<\|eot_id\|>|<\|endoftext\
 
 def _postprocess(text: str) -> str:
     text = (text or "").strip()
-    # strip leading quotes/space
     while text and text[0] in "\"'“”‘’ \n\t":
         text = text[1:].lstrip()
     text = _BAD_MARKERS_RE.sub("", text)
@@ -83,19 +80,31 @@ def _build_kwargs(
 def _encode(prompt: str):
     return tokenizer(prompt, return_tensors="pt").to(device)
 
+# -------- System + User prompt builder ----------
+def build_prompt(system_prompt: str, user_text: str) -> str:
+    sp = (system_prompt or "").strip()
+    ut = (user_text or "").strip()
+    if sp:
+        return f"{sp}\n\nUser: {ut}\nAssistant:"
+    else:
+        return f"User: {ut}\nAssistant:"
+
 # ------------ Streaming generation ------------
 def stream_hf_chat(
     prompt: str,
     *,
+    system_prompt: str = "",
     max_new_tokens: int = 128,
     temperature: float = 0.7,
     top_p: float = 0.9,
     repetition_penalty: float = 1.15,
 ):
     """
-    Token-by-token generator (optional). Your WS currently uses non-streaming.
+    Token-by-token generator (optional). Your WS uses this.
     """
-    inputs = _encode(prompt)
+    user_text = prompt
+    final_prompt = build_prompt(system_prompt, user_text)
+    inputs = _encode(final_prompt)
     streamer = TextIteratorStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
     gen_kwargs = _build_kwargs(
         max_new_tokens=max_new_tokens,
@@ -121,6 +130,7 @@ def stream_hf_chat(
 def generate_full(
     prompt: str,
     *,
+    system_prompt: str = "",
     max_new_tokens: int = 128,
     temperature: float = 0.7,
     top_p: float = 0.9,
@@ -130,7 +140,9 @@ def generate_full(
     """
     Reliable one-shot completion. Returns a clean plain string.
     """
-    inputs = _encode(prompt)
+    user_text = prompt
+    final_prompt = build_prompt(system_prompt, user_text)
+    inputs = _encode(final_prompt)
     gen_kwargs = _build_kwargs(
         max_new_tokens=max_new_tokens,
         temperature=temperature,
@@ -141,11 +153,9 @@ def generate_full(
     with _model_lock, torch.no_grad():
         out = model.generate(**inputs, **gen_kwargs)
 
-    # decode only the new tokens
     new_tokens = out[0, inputs["input_ids"].shape[1]:]
     text = tokenizer.decode(new_tokens, skip_special_tokens=True)
 
-    # optional stop markers
     if stop:
         for s in stop:
             if not s:
