@@ -49,6 +49,13 @@ TTS_CHUNK_MS    = int(os.getenv("TTS_CHUNK_MS", 80))
 raw_origins = os.getenv("FRONTEND_ORIGINS", "")
 FRONTEND_ORIGINS = [o.strip() for o in raw_origins.split(",") if o.strip()]
 
+
+# ======================
+# Metrics / Logging
+# ======================
+METRICS_ENABLED = os.getenv("METRICS_ENABLED", "true").lower() == "true"
+
+
 # ======================
 # Personas (system prompts + TTS presets)
 # ======================
