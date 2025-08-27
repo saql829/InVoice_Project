@@ -9,13 +9,16 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], allow_credentials=True,
-    allow_methods=["*"], allow_headers=["*"],
+    allow_origins=["*"],  # allow all origins for now
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
+# Routers
 app.include_router(voice_router, prefix="/chat")
 app.include_router(ws_router)
-app.include_router(llm_router)             
+app.include_router(llm_router)
 
 @app.get("/")
 def root():
