@@ -21,6 +21,7 @@ model = AutoModelForCausalLM.from_pretrained(
 model.to(DEVICE)
 model.eval()
 
+
 def build_prompt(messages):
     if hasattr(tokenizer, "apply_chat_template"):
         return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -31,7 +32,11 @@ def build_prompt(messages):
     prompt += "Assistant: "
     return prompt
 
+
 def stream_llm(messages, max_new_tokens=128, temperature=0.7, top_p=0.9):
+    """
+    Stream response from LLM, yield string chunks (never generator objects).
+    """
     prompt = build_prompt(messages)
     input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(DEVICE)
 
@@ -50,7 +55,9 @@ def stream_llm(messages, max_new_tokens=128, temperature=0.7, top_p=0.9):
     thread.start()
 
     for new_text in streamer:
-        yield new_text
+        # 🔥 ensure string
+        yield str(new_text)
+
 
 def generate_response(user_input: str) -> str:
     """Non-streaming single shot for /chat/voice."""
@@ -58,7 +65,6 @@ def generate_response(user_input: str) -> str:
         {"role": "system", "content": "You are a concise helpful assistant."},
         {"role": "user", "content": user_input},
     ]
-    # Join streamed chunks into one string
     out = []
     for chunk in stream_llm(msgs, max_new_tokens=128, temperature=0.7, top_p=0.9):
         out.append(chunk)

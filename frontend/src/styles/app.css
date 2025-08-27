@@ -1,0 +1,43 @@
+body {
+  font-family: Arial, sans-serif;
+  background: #121212;
+  color: white;
+  margin: 0;
+  padding: 0;
+}
+
+.app-container {
+  text-align: center;
+  padding: 20px;
+}
+
+.mic-btn {
+  font-size: 18px;
+  padding: 12px 20px;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  margin: 10px;
+  background: #444;
+  color: white;
+}
+
+.mic-btn.recording {
+  background: red;
+}
+
+.transcript {
+  background: #1e1e1e;
+  padding: 15px;
+  margin-top: 20px;
+  border-radius: 8px;
+}
+
+.speaking-indicator {
+  margin-top: 10px;
+  font-weight: bold;
+}
+
+.speaking-indicator.active {
+  color: red;
+}
