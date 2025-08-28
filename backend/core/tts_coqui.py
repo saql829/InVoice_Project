@@ -73,7 +73,7 @@ def stream_tts_pcm(
 ) -> Iterable[bytes]:
     """
     Generate full audio then yield PCM16 in small chunks (fake streaming).
-    Works reliably and starts delivering chunks quickly.
+    Ensures final flush so frontend always gets the complete audio.
     """
     pcm = tts_full_pcm16(text, speaker_wav=speaker_wav, language=language)
     if not pcm:
@@ -84,8 +84,13 @@ def stream_tts_pcm(
     # bytes per ms: (sr * 2 bytes * 1ch) / 1000
     b_per_ms = (sr * 2) / 1000.0
     step = max(1, int(ms * b_per_ms))
+
     for i in range(0, len(pcm), step):
         yield pcm[i : i + step]
+
+    # Force flush marker
+    yield b""  # lets frontend know audio is complete
+
 
 def tts_info():
     _ensure_init()

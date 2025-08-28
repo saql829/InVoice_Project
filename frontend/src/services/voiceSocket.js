@@ -1,9 +1,8 @@
-// frontend/src/services/voiceSocket.js
-// Handles JSON messages and binary PCM16 streaming for TTS + STT.
-
-export function createVoiceSocket({ url = "ws://localhost:8000/ws/voice", onEvent }) {
+export function createVoiceSocket({ url = "ws://localhost:8000/ws/voice", onEvent, personality = "default", voice = "alloy" }) {
   let ws = null;
   let audioPlayer = createAudioPlayer();
+  let sessionId = localStorage.getItem("session_id") || null;
+
   const notify = (evt) => { try { onEvent?.(evt); } catch (e) { console.warn(e); } };
 
   function connect() {
@@ -13,54 +12,99 @@ export function createVoiceSocket({ url = "ws://localhost:8000/ws/voice", onEven
 
     ws.onopen = () => {
       notify({ type: "socket_open" });
-      try { ws.send(JSON.stringify({ type: "start", sample_rate: 16000 })); } catch {}
+
+      ws.send(JSON.stringify({
+        type: "start",
+        sample_rate: 16000,
+        session: sessionId || undefined,
+        personality,
+        voice,
+      }));
     };
 
-    ws.onmessage = (e) => {
+    ws.onmessage = async (e) => {
       try {
         if (e.data instanceof ArrayBuffer) {
-          try { audioPlayer.playPcm16Chunk(e.data); } catch (err) { console.warn("audio play error:", err); }
+          audioPlayer.playPcm16Chunk(e.data);
+          notify({ type: "tts_chunk_bin" });
           return;
         }
 
         let data;
-        try { data = JSON.parse(e.data); } catch (err) { notify({ type: "raw", text: String(e.data) }); return; }
-
-        if (data.type === "tts_chunk" && data.b64) {
-          const bin = atob(data.b64);
-          const arr = new Uint8Array(bin.length);
-          for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
-          audioPlayer.playPcm16Chunk(arr.buffer);
-          notify(data);
+        try { data = JSON.parse(e.data); } catch {
+          notify({ type: "raw", text: String(e.data) });
           return;
         }
 
-        if (data.type === "tts_start") {
-          const sr = data.sample_rate || 22050;
-          audioPlayer.setSampleRate(sr);
-          notify({ type: "tts_start", sample_rate: sr, format: data.format });
-          return;
+        if (data.type === "ack" && data.session) {
+          sessionId = data.session;
+          localStorage.setItem("session_id", sessionId);
+          console.log(" Saved session:", sessionId);
         }
-        if (data.type === "tts_done") {
-          notify({ type: "tts_done" });
-          return;
+
+        switch (data.type) {
+          case "tts_chunk":
+            if (data.b64) {
+              const bin = atob(data.b64);
+              const arr = new Uint8Array(bin.length);
+              for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+              audioPlayer.playPcm16Chunk(arr.buffer);
+            }
+            break;
+
+          case "tts_start":
+            audioPlayer.setSampleRate(data.sample_rate || 22050);
+            break;
+
+          case "tts_done":
+            audioPlayer.flush();
+            break;
         }
 
         notify(data);
-
       } catch (err) {
         console.warn("onmessage handling error:", err);
       }
     };
 
-    ws.onerror = (err) => { notify({ type: "error", error: String(err) }); };
-    ws.onclose = () => { notify({ type: "socket_close" }); try { audioPlayer.close(); } catch {}; ws = null; };
+    ws.onerror = (err) => notify({ type: "error", error: String(err) });
+    ws.onclose = () => {
+      notify({ type: "socket_close" });
+      try { audioPlayer.close(); } catch {}
+      ws = null;
+    };
   }
 
-  function sendStart(sampleRate = 16000) { if (!ws || ws.readyState !== WebSocket.OPEN) return; try { ws.send(JSON.stringify({ type: "start", sample_rate: sampleRate })); } catch {} }
-  function sendDone() { if (!ws || ws.readyState !== WebSocket.OPEN) return; try { ws.send("done"); } catch {} }
-  function sendAudio(buffer) { if (!ws || ws.readyState !== WebSocket.OPEN) return; try { ws.send(buffer); } catch {} }
-  function stop() { try { ws?.close(); } catch {}; ws = null; try { audioPlayer.close(); } catch {} }
+  // sendStart now accepts dynamic personality + voice
+  function sendStart(sampleRate = 16000, personalityOverride = personality, voiceOverride = voice) {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: "start",
+        sample_rate: sampleRate,
+        session: sessionId || undefined,
+        personality: personalityOverride,
+        voice: voiceOverride,
+      }));
+    }
+  }
+
+  function sendDone() {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: "stop", session: sessionId }));
+    }
+  }
+
+  function sendAudio(buffer) {
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(buffer);
+    }
+  }
+
+  function stop() {
+    try { ws?.close(); } catch {};
+    ws = null;
+    try { audioPlayer.close(); } catch {}
+  }
 
   connect();
 
@@ -69,7 +113,6 @@ export function createVoiceSocket({ url = "ws://localhost:8000/ws/voice", onEven
     sendDone,
     sendAudio,
     stop,
-    playTTS: (arrayBuffer) => audioPlayer.playPcm16Chunk(arrayBuffer),
     get ready() { return ws?.readyState === WebSocket.OPEN; },
   };
 }
@@ -82,21 +125,39 @@ function createAudioPlayer() {
 
   function ensureCtx() {
     if (!audioCtx) {
-      try { audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate }); } catch { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate });
       document.addEventListener("click", resumeIfNeeded, { once: true });
       document.addEventListener("keydown", resumeIfNeeded, { once: true });
     }
   }
 
-  function resumeIfNeeded() { if (audioCtx && audioCtx.state === "suspended") { audioCtx.resume().catch(()=>{}); } }
-  function setSampleRate(sr) { if (!sr) return; if (Number(sr) !== sampleRate) { if (audioCtx) { try { audioCtx.close(); } catch {} audioCtx = null; } sampleRate = Number(sr); playTime = 0; } ensureCtx(); }
-  function close() { try { audioCtx?.close(); } catch {} audioCtx = null; playTime = 0; }
+  function resumeIfNeeded() {
+    if (audioCtx?.state === "suspended") {
+      audioCtx.resume().catch(()=>{});
+    }
+  }
+
+  function setSampleRate(sr) { 
+    if (!sr) return; 
+    if (Number(sr) !== sampleRate) { 
+      if (audioCtx) { try { audioCtx.close(); } catch {} audioCtx = null; } 
+      sampleRate = Number(sr); 
+      playTime = 0; 
+    } 
+    ensureCtx(); 
+  }
+
+  function close() { 
+    try { audioCtx?.close(); } catch {} 
+    audioCtx = null; 
+    playTime = 0; 
+  }
 
   function pcm16ToFloat32(ab) {
     const view = new DataView(ab);
     const l = view.byteLength / 2;
     const out = new Float32Array(l);
-    for (let i = 0; i < l; i++) { out[i] = view.getInt16(i*2, true) / 32768.0; }
+    for (let i = 0; i < l; i++) out[i] = view.getInt16(i*2, true) / 32768.0;
     return out;
   }
 
@@ -111,9 +172,16 @@ function createAudioPlayer() {
     src.connect(audioCtx.destination);
     const now = audioCtx.currentTime;
     const startAt = Math.max(now + 0.05, playTime || now + 0.05);
-    try { src.start(startAt); } catch { try { src.start(); } catch {} }
+    src.start(startAt);
     playTime = startAt + buffer.duration;
   }
 
-  return { playPcm16Chunk, setSampleRate, close };
+  function flush() {
+    if (audioCtx && audioCtx.state === "suspended") {
+      audioCtx.resume().catch(()=>{});
+    }
+    playTime = 0;
+  }
+
+  return { playPcm16Chunk, setSampleRate, close, flush };
 }

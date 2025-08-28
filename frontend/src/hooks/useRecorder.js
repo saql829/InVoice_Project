@@ -1,8 +1,9 @@
+// frontend/src/hooks/useRecorder.js
 import { useEffect, useRef, useState } from "react";
 import { downsampleTo16k, float32ToInt16 } from "../utils/audio";
 
 export function useRecorder(options = {}) {
-  const { onPcmChunk } = options || {};   // safe destructure
+  const { onPcmChunk, vadThreshold = 0.01 } = options; // energy threshold configurable
 
   const [recording, setRecording] = useState(false);
   const [error, setError] = useState(null);
@@ -32,14 +33,20 @@ export function useRecorder(options = {}) {
 
       node.port.onmessage = (e) => {
         const float32_48k = e.data;
+        if (!float32_48k || !float32_48k.length) return;
+
+        // energy calc
         const energy = Math.sqrt(
           float32_48k.reduce((acc, val) => acc + val * val, 0) /
             float32_48k.length
         );
 
-        // VAD: sirf jab volume kaafi high ho
-        if (energy > 0.01) {
-          const float32_16k = downsampleTo16k(float32_48k, 48000);
+        // VAD
+        if (energy > vadThreshold) {
+          // 🔹 Normalize before downsampling
+          const normalized = normalizeFloat32(float32_48k);
+
+          const float32_16k = downsampleTo16k(normalized, 48000);
           const int16 = float32ToInt16(float32_16k);
 
           if (typeof onPcmChunk === "function") {
@@ -70,6 +77,17 @@ export function useRecorder(options = {}) {
     workletRef.current = null;
     audioCtxRef.current = null;
     streamRef.current = null;
+  }
+
+  // 🔹 Normalize input audio to avoid mishearing ("Pakistan" → "aksan")
+  function normalizeFloat32(float32) {
+    let max = 0;
+    for (let i = 0; i < float32.length; i++) {
+      max = Math.max(max, Math.abs(float32[i]));
+    }
+    if (max < 1e-5) return float32;
+    const factor = 1 / max;
+    return float32.map(v => v * factor);
   }
 
   return { start, stop, recording, error };
