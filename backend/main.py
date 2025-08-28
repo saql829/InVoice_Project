@@ -6,6 +6,8 @@ import logging, time
 from api.voice_chat import router as voice_router
 from api.chat import router as chat_router
 from api.ws_voice import router as ws_router  # keep as-is (your older socket)
+from api.history import router as history_router  # 🔹 new import
+
 from config.settings import API_HOST, API_PORT, FRONTEND_ORIGINS, LOG_LEVEL, METRICS_ENABLED
 
 # metrics
@@ -53,10 +55,11 @@ if METRICS_ENABLED:
 def health_check():
     return {"status": "ok"}
 
-# Routers
+# -------- Routers --------
 app.include_router(voice_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(ws_router)  # NOTE: also defines /ws/voice (legacy)
+app.include_router(history_router, prefix="/api")  # 🔹 added history route
 
 # -------- metrics endpoints --------
 if METRICS_ENABLED:

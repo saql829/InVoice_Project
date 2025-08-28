@@ -9,14 +9,15 @@ from fastapi import APIRouter, UploadFile, File, HTTPException, WebSocket, WebSo
 from core.stt_whisper import transcribe_bytes, transcribe_audio
 from core.llm_hf import stream_hf_chat, count_tokens
 from core.tts_coqui import stream_tts_with_preset
+from utils.db import get_db
+from utils.topics import guess_topic
 
 from config.settings import (
     TTS_SAMPLE_RATE, AUDIO_SAMPLE_RATE, FRAME_MS,
-    PERSONAS, TTS_PRESETS, DEFAULT_PERSONA_KEY
+    PERSONAS, TTS_PRESETS, DEFAULT_PERSONA_KEY,
+    METRICS_ENABLED
 )
 
-# metrics
-from config.settings import METRICS_ENABLED
 if METRICS_ENABLED:
     from utils.metrics import (
         ws_open, ws_close, add_audio_bytes, observe_stt_latency,
@@ -46,19 +47,20 @@ PARTIAL_EVERY = 2
 
 router = APIRouter(tags=["Voice"])
 
-# Block common spurious speaker labels or end markers
+# ---------------- Regex Guardrails ----------------
 BAD_MARKERS_RE = re.compile(
     r"\b(assistant|user|system|ai|bot|responder|machine|teacher)\s*:\s*|</s>|<\|eot_id\|>",
     re.IGNORECASE
 )
-
 GREET_RE = re.compile(r"\b(hi|hello|hey|how are you|what'?s up|sup)\b", re.I)
 
-# Guardrail injected before persona prompt
+# ---------------- Persona Guardrail ----------------
 DEFAULT_GUARDRAIL = (
-    "You are a real-time voice assistant. Reply in ONE short sentence (<=25 words). "
-    "Be warm and conversational. Do not use any speaker labels. "
-    "Do not explain grammar or give examples unless explicitly asked."
+    "You are a real-time voice assistant. "
+    "Keep replies short (<=50 words). "
+    "Always follow the persona style strictly — "
+    "if persona is Friendly use emojis, "
+    "if persona is Teacher explain step by step, etc."
 )
 
 def _join_prompts(*parts: str) -> str:
@@ -71,7 +73,7 @@ def _clean_leading_strict(s: str) -> str:
         s = s[1:].lstrip()
     return s
 
-# -------- Personas: session state ----------
+# ---------------- Personas: session state ----------------
 @dataclass
 class SessionState:
     persona_key: str = DEFAULT_PERSONA_KEY
@@ -86,7 +88,7 @@ class SessionState:
         if tts_preset and tts_preset in TTS_PRESETS:
             self.tts_preset_key = tts_preset
 
-# -------- HTTP: personas list ----------
+# ---------------- HTTP: personas list ----------------
 @router.get("/personas")
 def list_personas():
     return {
@@ -95,13 +97,12 @@ def list_personas():
         "tts_presets": list(TTS_PRESETS.keys()),
     }
 
-# -------- TTS streaming (instrumented) ----------
+# ---------------- TTS streaming ----------------
 async def _tts_stream_send(websocket: WebSocket, text: str, preset: dict | None = None):
     if not (text or "").strip():
         return
     with contextlib_suppress(WebSocketDisconnect):
         await websocket.send_json({"type": "tts_start", "sample_rate": int(TTS_SAMPLE_RATE or 22050), "format": "pcm16"})
-
     t0 = time.perf_counter()
     bytes_out = 0
     try:
@@ -112,126 +113,98 @@ async def _tts_stream_send(websocket: WebSocket, text: str, preset: dict | None 
     finally:
         with contextlib_suppress(WebSocketDisconnect):
             await websocket.send_json({"type": "tts_done"})
-        dt = time.perf_counter() - t0
         if METRICS_ENABLED:
-            observe_tts(bytes_out, dt)
-        log.info(f"TTS streamed {bytes_out/1024:.1f} KiB in {dt*1000:.1f} ms")
+            observe_tts(bytes_out, time.perf_counter() - t0)
 
-# -------- LLM streaming (instrumented) ----------
+# ---------------- LLM streaming ----------------
 async def stream_llm_safely(
     websocket: WebSocket,
     prompt: str,
     *,
     system_prompt: str = "",
     tts_preset: dict | None = None,
-    max_new_tokens: int = 128,
-    max_sentences: int = 2
+    max_new_tokens: int = 256,
+    max_sentences: int = 5
 ) -> str:
     buffer = ""
     last_sent_idx = 0
-    max_chars = 220
+    max_chars = 600
     llm_t0 = time.perf_counter()
 
     for tok in stream_hf_chat(
         prompt,
         system_prompt=system_prompt,
         max_new_tokens=max_new_tokens,
-        do_sample=False,  # greedy by default; clean & short
+        do_sample=True,
+        temperature=0.7,
+        top_p=0.9,
+        max_sentences=max_sentences,
     ):
         if not tok:
             continue
-
-        # Drop speaker labels or end markers mid-stream
         if BAD_MARKERS_RE.search(tok):
             continue
-
         buffer += tok
-
-        # Clean leading quotes etc only once
         if last_sent_idx == 0:
             cleaned = _clean_leading_strict(buffer)
             if cleaned != buffer:
                 buffer = cleaned
-
-        # Emit deltas as we go
         delta = buffer[last_sent_idx:]
         if delta.strip():
             with contextlib_suppress(WebSocketDisconnect):
                 await websocket.send_json({"type": "delta", "text": delta})
             last_sent_idx = len(buffer)
-
-        # Cut after sentence/char limits
         if len(re.findall(r"[\.!?]", buffer)) >= max_sentences or len(buffer) >= max_chars:
             break
 
     final_text = buffer.strip()
-    llm_dt = time.perf_counter() - llm_t0
     if final_text:
         with contextlib_suppress(WebSocketDisconnect):
             await websocket.send_json({"type": "assistant_final", "text": final_text})
         await _tts_stream_send(websocket, final_text, preset=tts_preset)
 
-    # record LLM metrics once we know the final emitted text
+        # 🔹 Save assistant reply to DB
+        conn = get_db()
+        conn.execute("INSERT INTO conversations (session_id, role, text, topic) VALUES (?, ?, ?, ?)",
+                     (websocket.headers.get("x-session-id", "default"), "assistant", final_text, guess_topic(final_text)))
+        conn.commit()
+        conn.close()
+
     if METRICS_ENABLED:
         out_tok = count_tokens(final_text) if final_text else 0
-        observe_llm_out(out_tok, llm_dt)
+        observe_llm_out(out_tok, time.perf_counter() - llm_t0)
 
     return final_text
 
-# -----------------------------
-# HTTP: file upload -> transcript
-# -----------------------------
+# ---------------- File upload -> transcript ----------------
 @router.post("/transcribe")
 async def transcribe(file: UploadFile = File(...)):
     name = (file.filename or "").lower()
     if not name.endswith((".wav", ".mp3", ".m4a", ".ogg", ".webm")):
         raise HTTPException(status_code=400, detail="Only wav/mp3/m4a/ogg/webm supported")
-
     try:
         data = await file.read()
-        t0 = time.perf_counter()
         text = transcribe_bytes(data, mime=file.content_type)
         if METRICS_ENABLED:
-            observe_stt_latency(time.perf_counter() - t0)
+            observe_stt_latency(time.perf_counter())
         return {"transcript": text}
     except Exception as e:
         if METRICS_ENABLED: note_error("stt_http", e)
         log.exception("Error in /transcribe")
         raise HTTPException(status_code=500, detail="Internal transcription error")
 
-# -----------------------------
-# Simple HTTP TTS for quick test
-# -----------------------------
-@router.post("/tts")
-async def tts_http(payload: dict = Body(...)):
-    text = payload.get("text", "")
-    if not text.strip():
-        return {"error": "Text is empty"}
-    from core.tts_coqui import stream_tts_pcm
-    t0 = time.perf_counter()
-    pcm_chunks = list(stream_tts_pcm(text))
-    pcm_data = b"".join(pcm_chunks)
-    dt = time.perf_counter() - t0
-    if METRICS_ENABLED:
-        observe_tts(len(pcm_data), dt)
-    wav_bytes = pcm16_to_wav_bytes(pcm_data, sample_rate=TTS_SAMPLE_RATE or 22050)
-    from fastapi.responses import StreamingResponse
-    return StreamingResponse(io.BytesIO(wav_bytes), media_type="audio/wav")
-
-# -------------------------------------------------------------
-# WebSocket: audio bytes -> STT -> LLM stream -> TTS stream
-# -------------------------------------------------------------
+# ---------------- WebSocket: STT -> LLM -> TTS ----------------
 @router.websocket("/ws/voice")
 async def ws_voice(websocket: WebSocket):
     await websocket.accept()
     session_id = str(uuid.uuid4())
+    websocket.headers["x-session-id"] = session_id  # 🔹 custom attach for DB saving
     buf = io.BytesIO()
     chunk_count = 0
     last_partial = ""
     session = SessionState()
 
     if METRICS_ENABLED: ws_open()
-    if METRICS_ENABLED: log_event("ws", "ready", session=session_id, persona=session.persona_key)
     try:
         with contextlib_suppress(WebSocketDisconnect):
             await websocket.send_json({"type": "ready", "session": session_id, "persona": session.persona_key})
@@ -240,11 +213,9 @@ async def ws_voice(websocket: WebSocket):
             try:
                 msg = await websocket.receive()
             except (WebSocketDisconnect, RuntimeError):
-                # RuntimeError may appear after disconnect; treat same as WS close.
-                log.info(f"[{session_id}] client disconnected")
                 break
 
-            # Text/json messages
+            # ---------- Text / JSON control ----------
             if "text" in msg and msg["text"] is not None:
                 txt = msg["text"]
                 low = (txt or "").strip().lower()
@@ -253,138 +224,74 @@ async def ws_voice(websocket: WebSocket):
                 except Exception:
                     data = None
 
+                # --- Config ---
                 if isinstance(data, dict) and data.get("type") == "config":
-                    session.apply(
-                        persona=(data.get("persona") or "").strip() or None,
-                        tts_preset=(data.get("tts_preset") or "").strip() or None,
-                    )
+                    session.apply(persona=data.get("persona"), tts_preset=data.get("tts_preset"))
                     with contextlib_suppress(WebSocketDisconnect):
-                        await websocket.send_json({
-                            "type": "config-ack",
-                            "persona": session.persona_key,
-                            "tts_preset": session.tts_preset_key
-                        })
-                    log.info(f"[{session_id}] config persona={session.persona_key} tts={session.tts_preset_key}")
-                    if METRICS_ENABLED: log_event("ws", "config", persona=session.persona_key, tts=session.tts_preset_key)
+                        await websocket.send_json({"type": "config-ack", "persona": session.persona_key, "tts_preset": session.tts_preset_key})
                     continue
 
+                # --- Start ---
                 if isinstance(data, dict) and data.get("type") == "start":
                     with contextlib_suppress(WebSocketDisconnect):
                         await websocket.send_json({"type": "started", "sample_rate": data.get("sample_rate", AUDIO_SAMPLE_RATE)})
-                    log.info(f"[{session_id}] start (sr={data.get('sample_rate', AUDIO_SAMPLE_RATE)})")
                     continue
 
-                # End signal -> finalize STT
+                # --- End / Finalize ---
                 if low in ("done", "end") or (isinstance(data, dict) and data.get("event") in ("end", "done")):
                     pcm = buf.getvalue()
-                    log.info(f"[{session_id}] finalize: buf={len(pcm)} bytes")
                     if pcm:
                         wav = pcm16_to_wav_bytes(pcm, sample_rate=AUDIO_SAMPLE_RATE)
-                        stt_t0 = time.perf_counter()
                         try:
                             final_text = transcribe_bytes(wav, mime="audio/wav")
                         except Exception as e:
-                            if METRICS_ENABLED: note_error("stt_final", e)
                             final_text = ""
-                            log.exception(f"[{session_id}] STT final error")
-                        finally:
-                            if METRICS_ENABLED:
-                                observe_stt_latency(time.perf_counter() - stt_t0)
                     else:
                         final_text = ""
+
+                    # 🔹 Save user message to DB
+                    if final_text:
+                        conn = get_db()
+                        conn.execute("INSERT INTO conversations (session_id, role, text, topic) VALUES (?, ?, ?, ?)",
+                                     (session_id, "user", final_text, guess_topic(final_text)))
+                        conn.commit()
+                        conn.close()
 
                     with contextlib_suppress(WebSocketDisconnect):
                         await websocket.send_json({"type": "transcript", "final": True, "text": final_text})
 
-                    # reset buffer for next turn
-                    chunk_count = 0
                     buf = io.BytesIO()
+                    chunk_count = 0
 
-                    # Quick greeting router to avoid off-topic replies
                     if final_text and GREET_RE.search(final_text):
-                        quick = "hey! I'm good — how's your day going?"
+                        quick = "Hey! I'm good — how’s your day?"
                         with contextlib_suppress(WebSocketDisconnect):
                             await websocket.send_json({"type": "assistant_final", "text": quick})
                         await _tts_stream_send(websocket, quick, preset=TTS_PRESETS.get(session.tts_preset_key, {}))
                         continue
 
-                    # LLM phase
                     if final_text:
-                        if METRICS_ENABLED:
-                            in_tok = count_tokens(final_text)
-                            add_llm_in_tokens(in_tok)
-                        try:
-                            sys_prompt = _join_prompts(DEFAULT_GUARDRAIL, session.system_prompt)
-                            await stream_llm_safely(
-                                websocket,
-                                final_text,
-                                system_prompt=sys_prompt,
-                                tts_preset=TTS_PRESETS.get(session.tts_preset_key, {}),
-                            )
-                        except Exception as e:
-                            if METRICS_ENABLED: note_error("llm_stream", e)
-                            log.exception(f"[{session_id}] LLM error")
-                            with contextlib_suppress(WebSocketDisconnect):
-                                await websocket.send_json({"type": "error", "message": f"llm error: {e}"})
+                        await stream_llm_safely(websocket, final_text, system_prompt=_join_prompts(DEFAULT_GUARDRAIL, session.system_prompt), tts_preset=TTS_PRESETS.get(session.tts_preset_key, {}))
                     continue
 
-                # Unknown text -> ignore
-                continue
-
-            # Binary audio frames
+            # ---------- Binary audio ----------
             if "bytes" in msg and msg["bytes"] is not None:
                 payload: bytes = msg["bytes"]
-                if not payload:
-                    continue
-                buf.write(payload)
-                chunk_count += 1
-                if METRICS_ENABLED: add_audio_bytes(len(payload))
-                with contextlib_suppress(WebSocketDisconnect):
-                    await websocket.send_json({"type": "ack", "chunk": chunk_count, "bytes": len(payload)})
+                if payload:
+                    buf.write(payload)
+                    chunk_count += 1
+                    if METRICS_ENABLED: add_audio_bytes(len(payload))
+                    with contextlib_suppress(WebSocketDisconnect):
+                        await websocket.send_json({"type": "ack", "chunk": chunk_count, "bytes": len(payload)})
 
-                # partial STT occasionally (optional)
-                if chunk_count % PARTIAL_EVERY == 0:
-                    recent = buf.getvalue()[-(PARTIAL_EVERY * CHUNK_SIZE):]
-                    if recent:
-                        try:
-                            wav = pcm16_to_wav_bytes(recent, sample_rate=AUDIO_SAMPLE_RATE)
-                            partial = transcribe_bytes(wav, mime="audio/wav")
-                            partial = (partial or "").strip()
-                        except Exception as e:
-                            partial = ""
-                            if METRICS_ENABLED: note_error("stt_partial", e)
-
-                        if partial and partial != last_partial:
-                            last_partial = partial
-                            with contextlib_suppress(WebSocketDisconnect):
-                                await websocket.send_json({"type": "stt_partial", "text": partial})
-                            # Optional: quick one-sentence LLM on partials
-                            if len(partial) > 10 and partial[-1] in (" ", ".", "?", "!"):
-                                try:
-                                    sys_prompt = _join_prompts(DEFAULT_GUARDRAIL, session.system_prompt)
-                                    await stream_llm_safely(
-                                        websocket,
-                                        partial,
-                                        system_prompt=sys_prompt,
-                                        tts_preset=TTS_PRESETS.get(session.tts_preset_key, {}),
-                                        max_new_tokens=64,
-                                        max_sentences=1
-                                    )
-                                except Exception as e:
-                                    if METRICS_ENABLED: note_error("llm_partial", e)
-                                    with contextlib_suppress(WebSocketDisconnect):
-                                        await websocket.send_json({"type": "error", "message": f"llm error: {e}"})
-                continue
-
-    except WebSocketDisconnect:
-        log.info(f"[{session_id}] client disconnected")
-    except Exception as e:
-        if METRICS_ENABLED: note_error("ws_voice", e)
-        try:
-            with contextlib_suppress(WebSocketDisconnect):
-                await websocket.send_json({"type": "error", "message": str(e)})
-        finally:
-            with contextlib_suppress(WebSocketDisconnect):
-                await websocket.close()
     finally:
         if METRICS_ENABLED: ws_close()
+
+# ---------------- Resume API ----------------
+@router.get("/history/{session_id}")
+def get_history(session_id: str, limit: int = 10):
+    conn = get_db()
+    cur = conn.execute("SELECT role, text, topic, ts FROM conversations WHERE session_id=? ORDER BY id DESC LIMIT ?", (session_id, limit))
+    rows = cur.fetchall()
+    conn.close()
+    return [dict(r) for r in reversed(rows)]

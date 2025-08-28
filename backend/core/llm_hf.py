@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-HF LLM wrapper: streaming + full generation with robust, short, single-sentence replies.
+HF LLM wrapper: streaming + full generation with natural multi-sentence replies.
 
 - Exports: stream_hf_chat, generate_full, count_tokens, count_chat_tokens
-- Hard-stops after N sentences (default=1)
-- Stops on role markers (User:/Assistant:/System:) + blank line ("\n\n")
+- Default: up to 5 sentences
 """
 
 from __future__ import annotations
@@ -29,20 +28,13 @@ from transformers import (
 _model: Optional[AutoModelForCausalLM] = None
 _tokenizer: Optional[AutoTokenizer] = None
 
-# Helpful defaults (override via env if you like)
-_HF_MODEL_ID = os.getenv("HF_MODEL_ID", "meta-llama/Llama-3.1-8B-Instruct")
+# Load model from .env
+_HF_MODEL_ID = os.getenv("LLM_MODEL", "TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 _DEVICE_MAP = os.getenv("HF_DEVICE_MAP", "auto")
 _DTYPE = torch.float16 if torch.cuda.is_available() else torch.float32
 
-# Role/format stop strings (plus blank line)
-_STOP_STRINGS: List[str] = [
-    "\nUser:", "\n\nUser:", "User:",
-    "\nAssistant:", "\n\nAssistant:", "Assistant:",
-    "\nSystem:", "System:",
-    "\n\n",  # blank line — end turn
-]
-
-# Tokenized stop sequences (populated after tokenizer loads)
+# Only stop on blank line (not on role markers)
+_STOP_STRINGS: List[str] = ["\n\n"]
 _STOP_SEQ_IDS: List[List[int]] = []
 
 
@@ -64,7 +56,6 @@ def _ensure_loaded() -> None:
         )
         _model.eval()
 
-    # build stop sequences once
     if not _STOP_SEQ_IDS:
         for s in _STOP_STRINGS:
             ids = _tokenizer.encode(s, add_special_tokens=False)
@@ -73,9 +64,6 @@ def _ensure_loaded() -> None:
 
 
 def _apply_chat_template(system_prompt: str, user_prompt: str) -> str:
-    """
-    Use tokenizer's chat_template if present; otherwise fall back to a simple format.
-    """
     assert _tokenizer is not None
     try:
         if getattr(_tokenizer, "chat_template", None):
@@ -86,36 +74,17 @@ def _apply_chat_template(system_prompt: str, user_prompt: str) -> str:
             return _tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     except Exception:
         pass
-
-    # Fallback prompt text
     sys = f"System: {system_prompt.strip()}\n" if system_prompt.strip() else ""
     return f"{sys}User: {user_prompt}\nAssistant:"
 
 
 def _sanitize_output(text: str) -> str:
-    """
-    Remove accidental role echoes and trim.
-    """
-    # Drop anything after another role marker that the model may emit
-    cut_markers = ["\nUser:", "\n\nUser:", "User:", "\nAssistant:", "\n\nAssistant:", "Assistant:", "\nSystem:", "System:"]
-    cut_pos = None
-    for m in cut_markers:
-        i = text.find(m)
-        if i != -1:
-            cut_pos = i if cut_pos is None else min(cut_pos, i)
-    if cut_pos is not None:
-        text = text[:cut_pos]
-
-    # Collapse whitespace
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+    """Keep output intact, just collapse whitespace."""
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def _cut_to_n_sentences(text: str, n: int) -> str:
-    """
-    Hard truncate text to the first n sentence terminators.
-    Sentence enders: ., !, ? followed by space or end.
-    """
+    """Truncate to first n sentences if needed."""
     n = max(1, int(n))
     end = None
     count = 0
@@ -133,9 +102,6 @@ def _cut_to_n_sentences(text: str, n: int) -> str:
 # Stopping criteria
 # -------------------
 class StopOnSequences(StoppingCriteria):
-    """
-    Stop when the last tokens match any of the provided stop sequences.
-    """
     def __init__(self, stop_sequences: List[List[int]]):
         super().__init__()
         self.stop_sequences = stop_sequences
@@ -151,10 +117,7 @@ class StopOnSequences(StoppingCriteria):
 
 
 class StopAfterSentences(StoppingCriteria):
-    """
-    Stop after N sentence enders across the recent token window.
-    """
-    def __init__(self, tokenizer: AutoTokenizer, max_sentences: int = 1, window_tokens: int = 160):
+    def __init__(self, tokenizer: AutoTokenizer, max_sentences: int = 5, window_tokens: int = 160):
         super().__init__()
         self.tok = tokenizer
         self.max_sentences = max(1, int(max_sentences))
@@ -177,18 +140,17 @@ class StopAfterSentences(StoppingCriteria):
 # -------------------
 def _build_kwargs(
     *,
-    max_new_tokens: int = 128,
+    max_new_tokens: int = 256,
     repetition_penalty: float = 1.10,
     streamer=None,
-    do_sample: bool = False,
+    do_sample: bool = True,
     temperature: float = 0.7,
     top_p: float = 0.9,
-    max_sentences: int = 1,
+    max_sentences: int = 5,
 ) -> Dict[str, Any]:
     _ensure_loaded()
     assert _tokenizer is not None
 
-    # Use HF eos if available; stop strings handled by StoppingCriteria
     eos_ids: Optional[int] | List[int] = None
     if _tokenizer.eos_token_id is not None:
         eos_ids = _tokenizer.eos_token_id
@@ -205,11 +167,11 @@ def _build_kwargs(
         eos_token_id=eos_ids,
         do_sample=bool(do_sample),
         stopping_criteria=stop_criteria,
+        temperature=temperature,
+        top_p=top_p,
     )
     if streamer is not None:
         kw["streamer"] = streamer
-    if do_sample:
-        kw.update(temperature=float(temperature), top_p=float(top_p))
     return kw
 
 
@@ -220,16 +182,13 @@ def stream_hf_chat(
     user_prompt: str,
     *,
     system_prompt: str = "",
-    max_new_tokens: int = 128,
-    do_sample: bool = False,
+    max_new_tokens: int = 256,
+    do_sample: bool = True,
     temperature: float = 0.7,
     top_p: float = 0.9,
     repetition_penalty: float = 1.12,
-    max_sentences: int = 1,
+    max_sentences: int = 5,
 ) -> Generator[str, None, None]:
-    """
-    Yield short response chunks; hard-stops at `max_sentences`.
-    """
     _ensure_loaded()
     assert _tokenizer is not None and _model is not None
 
@@ -261,16 +220,12 @@ def stream_hf_chat(
         if not piece:
             continue
         buf += piece
-        # cut as soon as we hit the N-th sentence end
         truncated = _cut_to_n_sentences(buf, max_sentences)
         if truncated != buf:
             yield _sanitize_output(truncated)
             return
-
-        # stream progressive sanitized chunks
         yield _sanitize_output(piece)
 
-    # model stopped before N sentences -> flush remainder
     if buf.strip():
         yield _sanitize_output(_cut_to_n_sentences(buf, max_sentences))
 
@@ -279,16 +234,13 @@ def generate_full(
     user_prompt: str,
     *,
     system_prompt: str = "",
-    max_new_tokens: int = 128,
-    do_sample: bool = False,
+    max_new_tokens: int = 256,
+    do_sample: bool = True,
     temperature: float = 0.7,
     top_p: float = 0.9,
     repetition_penalty: float = 1.12,
-    max_sentences: int = 1,
+    max_sentences: int = 5,
 ) -> str:
-    """
-    Return a single short response string; hard-stops at `max_sentences`.
-    """
     _ensure_loaded()
     assert _tokenizer is not None and _model is not None
 
@@ -312,26 +264,19 @@ def generate_full(
 
     new_tokens = out[0][inputs["input_ids"].shape[1]:]
     text = _tokenizer.decode(new_tokens, skip_special_tokens=True)
-    text = _sanitize_output(text)
     return _sanitize_output(_cut_to_n_sentences(text, max_sentences))
 
 
 # -------------------
-# Token counting helpers
+# Token counting
 # -------------------
 def count_tokens(text: str) -> int:
-    """
-    Count tokenizer tokens for raw text (no chat template).
-    """
     _ensure_loaded()
     assert _tokenizer is not None
     return len(_tokenizer.encode(text or "", add_special_tokens=False))
 
 
 def count_chat_tokens(system_prompt: str, user_prompt: str) -> int:
-    """
-    Count tokens after applying chat template (useful for budgeting).
-    """
     _ensure_loaded()
     assert _tokenizer is not None
     prompt_text = _apply_chat_template(system_prompt or "", user_prompt or "")
