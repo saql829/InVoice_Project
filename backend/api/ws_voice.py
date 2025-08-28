@@ -193,7 +193,7 @@ async def _send_llm_reply(ws: WebSocket, session_id: str, user_text: str, cid: s
     personality = PERSONALITIES.get(personality_key or DEFAULT_PERSONALITY, PERSONALITIES[DEFAULT_PERSONALITY])
     style_prefix = personality["prompt_prefix"]
 
-    # ✅ FIX: Put prefix as system role instead of conversation content
+    # FIX: Put prefix as system role instead of conversation content
     full_prompt = f"System: {style_prefix}\n\n"
     for h in history:
         full_prompt += f"{h['role'].capitalize()}: {h['content']}\n"
@@ -236,7 +236,7 @@ async def _send_llm_reply(ws: WebSocket, session_id: str, user_text: str, cid: s
     # 🔹 If detected language not supported by selected voice → fallback to default
     final_voice = voice
     if lang not in {"en", "english"}:
-        final_voice = "alloy"  # fallback voice
+        final_voice = "alloy"
 
     with contextlib_suppress(WebSocketDisconnect):
         await ws.send_json({
