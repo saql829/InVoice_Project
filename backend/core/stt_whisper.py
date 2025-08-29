@@ -3,7 +3,7 @@
 Whisper STT helpers:
 - Path + bytes transcription (thread-safe)
 - English forced by default via STT_LANGUAGE (.env) else "en"
-- No circular imports
+- If STT_LANGUAGE=auto → Whisper auto-detect
 """
 
 import os
@@ -39,7 +39,7 @@ except Exception:
     VAD_SILENCE_MS    = int(os.getenv("SILENCE_MS", "600"))
     STT_LANGUAGE      = os.getenv("STT_LANGUAGE", "en")
 
-_DEFAULT_LANG = (STT_LANGUAGE or "en").strip().lower() or "en"
+_DEFAULT_LANG = (STT_LANGUAGE or "en").strip().lower()
 
 # ---------------------------------------------------------------------
 # Load Whisper once + global lock
@@ -48,12 +48,19 @@ _device   = "cuda" if torch.cuda.is_available() else "cpu"
 _model    = whisper.load_model(WHISPER_MODEL, device=_device)
 _STT_LOCK = threading.Lock()
 
+def _resolve_lang(lang: Optional[str]) -> Optional[str]:
+    """
+    Convert "auto" -> None (for Whisper auto-detect).
+    """
+    setting = (lang or _DEFAULT_LANG)
+    return None if setting == "auto" else setting
+
 def _transcribe_f32(audio_f32: np.ndarray, language: Optional[str] = None) -> str:
     """
     audio_f32: mono float32 @16k in [-1, 1]
-    Returns a trimmed transcription string (no extra logs).
+    Returns a trimmed transcription string.
     """
-    lang = (language or _DEFAULT_LANG)
+    lang = _resolve_lang(language)
     with _STT_LOCK:
         result = _model.transcribe(
             audio_f32,
@@ -72,7 +79,7 @@ def transcribe_audio(path: str, language: Optional[str] = None) -> str:
     """
     File path -> Whisper transcribe.
     """
-    lang = (language or _DEFAULT_LANG)
+    lang = _resolve_lang(language)
     with _STT_LOCK:
         result = _model.transcribe(
             path,
@@ -94,7 +101,7 @@ def transcribe_bytes(data: bytes, mime: Optional[str] = None, language: Optional
     """
     pcm16     = decode_to_pcm16(data, mime=mime, target_rate=AUDIO_SAMPLE_RATE, target_channels=1)
     audio_f32 = pcm16_to_float32(pcm16)
-    return _transcribe_f32(audio_f32, language=language or _DEFAULT_LANG)
+    return _transcribe_f32(audio_f32, language=language)
 
 # ---------------------------------------------------------------------
 # 3) (optional) VAD streaming helper
@@ -103,7 +110,7 @@ def transcribe_vad_segments(pcm16_iter: Iterable[bytes], language: Optional[str]
     """
     Feed PCM16 mono @16k chunks, segment via VAD, and yield per-segment transcripts.
     """
-    lang = (language or _DEFAULT_LANG)
+    lang = _resolve_lang(language)
     buf = b""
     for chunk in pcm16_iter:
         buf += chunk
