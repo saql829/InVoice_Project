@@ -2,7 +2,7 @@
 import asyncio, json, websockets
 
 async def main():
-    uri = "ws://127.0.0.1:8000/ws/voice"
+    uri = "ws://127.0.0.1:8001/ws/voice"
     async with websockets.connect(uri, max_size=None) as ws:
         # sirf text bhej rahe hain (audio nahi)
         await ws.send(json.dumps({"type": "text", "text": "Hello from WS. How are you?"}))

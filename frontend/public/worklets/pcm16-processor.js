@@ -5,7 +5,7 @@ class Pcm16Downsampler extends AudioWorkletProcessor {
     constructor() {
       super();
       this.targetRate = 16000;
-      this.ratio = sampleRate / this.targetRate; // sampleRate = AudioContext rate (usually 48000)
+      this.ratio = sampleRate / this.targetRate; // sampleRate = AudioContext rate (usually 48001)
       this.inbuf = new Float32Array(0); // accumulate input @ sampleRate
       this.rpos = 0; // read pointer (float) over inbuf
       this.outbuf = new Float32Array(0); // accumulated @16k (float)

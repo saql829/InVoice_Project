@@ -7,7 +7,7 @@ export default function VoiceChat() {
 
   useEffect(() => {
     socketRef.current = createVoiceSocket({
-      url: "ws://localhost:8000/ws/voice",
+      url: "ws://localhost:8001/ws/voice",
       onEvent: (evt) => {
         console.log("Socket event:", evt);
       },

@@ -5,7 +5,7 @@ import requests
 import wave
 from config.settings import TTS_SAMPLE_RATE  # agar ye available hai
 
-TTS_URL = "http://127.0.0.1:8000/api/tts"
+TTS_URL = "http://127.0.0.1:8001/api/tts"
 OUTPUT_FILE = "output_streaming.wav"
 
 if len(sys.argv) < 2:

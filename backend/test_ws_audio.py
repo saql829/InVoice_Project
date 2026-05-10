@@ -7,9 +7,9 @@ import contextlib
 import websockets
 
 # NOTE: agar tumhara route /api ke under hai to niche wali line ko:
-# URI = "ws://127.0.0.1:8000/api/ws/voice"
+# URI = "ws://127.0.0.1:8001/api/ws/voice"
 # warna default (no prefix):
-URI = "ws://127.0.0.1:8000/api/ws/voice"
+URI = "ws://127.0.0.1:8001/api/ws/voice"
 
 
 FRAME_MS = 20         # 20ms frames

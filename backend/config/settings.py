@@ -16,7 +16,7 @@ HF_API_KEY    = os.getenv("HF_API_KEY")
 # Server Settings
 # ======================
 API_HOST      = os.getenv("API_HOST", "0.0.0.0")
-API_PORT      = int(os.getenv("API_PORT", 8000))
+API_PORT      = int(os.getenv("API_PORT", 8001))
 LOG_LEVEL     = os.getenv("LOG_LEVEL", "info")
 
 # ======================
@@ -46,8 +46,15 @@ TTS_CHUNK_MS    = int(os.getenv("TTS_CHUNK_MS", 80))
 # ======================
 # Frontend origins
 # ======================
-raw_origins = os.getenv("FRONTEND_ORIGINS", "")
-FRONTEND_ORIGINS = [o.strip() for o in raw_origins.split(",") if o.strip()]
+# raw_origins = os.getenv("FRONTEND_ORIGINS", "")
+# FRONTEND_ORIGINS = [o.strip() for o in raw_origins.split(",") if o.strip()]
+
+FRONTEND_ORIGINS = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174"
+]
 
 
 # ======================

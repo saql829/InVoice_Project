@@ -12,7 +12,7 @@ if len(sys.argv) < 2:
 text_input = " ".join(sys.argv[1:])
 OUTPUT_FILE = "output.wav"
 
-resp = requests.post("http://127.0.0.1:8000/api/tts", json={"text": text_input}, stream=True)
+resp = requests.post("http://127.0.0.1:8001/api/tts", json={"text": text_input}, stream=True)
 
 if resp.status_code != 200:
     print("Error:", resp.status_code, resp.text)

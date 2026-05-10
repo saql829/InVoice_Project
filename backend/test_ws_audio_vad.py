@@ -7,8 +7,8 @@ import contextlib
 import websockets
 
 # NOTE: agar tumhara route /api ke under ho to:
-# URI = "ws://127.0.0.1:8000/api/ws/voice?vad=1"
-URI = "ws://127.0.0.1:8000/api/ws/voice?vad=1"
+# URI = "ws://127.0.0.1:8001/api/ws/voice?vad=1"
+URI = "ws://127.0.0.1:8001/api/ws/voice?vad=1"
 
 FRAME_MS = 20
 SAMPLE_RATE = 16000

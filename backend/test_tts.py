@@ -2,7 +2,7 @@
 import requests
 
 # Updated URL with /api prefix
-TTS_URL = "http://127.0.0.1:8000/api/tts"
+TTS_URL = "http://127.0.0.1:8001/api/tts"
 
 text_to_speak = "Hello, this is a backend TTS test."
 

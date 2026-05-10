@@ -1,6 +1,6 @@
 // Handles JSON messages and binary PCM16 streaming for TTS + STT.
 
-export function createVoiceSocket({ url = "ws://localhost:8000/api/ws/voice", onEvent }) {
+export function createVoiceSocket({ url = "ws://localhost:8001/api/ws/voice", onEvent }) {
   let ws = null;
   let audioPlayer = createAudioPlayer();
   const notify = (evt) => { try { onEvent?.(evt); } catch (e) { console.warn(e); } };
@@ -136,7 +136,7 @@ function createAudioPlayer() {
 
 // Fetch available personas + presets from backend
 export async function fetchPersonas() {
-  const res = await fetch("/api/personas");
+  const res = await fetch("http://localhost:8001/api/personas");
   if (!res.ok) throw new Error("Failed to load personas");
   return res.json();
 }
